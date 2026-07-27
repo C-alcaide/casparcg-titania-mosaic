@@ -1,0 +1,20 @@
+*.dir
+*.vcxproj
+*.vcxproj.filters
+*.tlog
+*.sln
+.settings
+.vscode
+.idea
+.vs
+build
+dist
+CMakeFiles
+casparcg_server
+
+src/cmake-build-*
+src/.idea
+
+# debian build artifacts
+/debian
+/obj-*

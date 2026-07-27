@@ -1,0 +1,13 @@
+src/packages
+src/cmake-build-*
+build-scripts
+build
+resources
+.git
+.vscode
+CMakeFiles
+casparcg_server
+
+dist
+build
+src/cmake-build-*
