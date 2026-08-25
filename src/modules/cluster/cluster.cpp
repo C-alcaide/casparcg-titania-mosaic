@@ -55,14 +55,12 @@ struct cluster_state
     bool                                        active          = false;
     bool                                        watchdog_armed  = false; // true once channels are captured
 
-    // Populated from module_dependencies at init() — used to keep frame_clock's
-    // framerate in sync with the local channel's actual format instead of the
-    // hardcoded 50fps it's constructed with. May be empty if no channels were
-    // configured yet at module-init time (channel_context entries are shared
-    // with shell/server.cpp and get their raw_channel populated later in
-    // startup, so re-reading this at command time, not init time, is required).
-    spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels;
-    boost::rational<int>                                          last_synced_framerate{0, 1};
+    // Nuestra base (v2.5.0-stable) no tiene core::module_dependencies::channels
+    // (existe en la base mas nueva del fork de origen) - la unica fuente real de
+    // channel_context aqui es la que trae cada command_context (ctx.channels),
+    // igual que ya hacia arm_watchdog() de forma diferida. last_synced_framerate
+    // sigue en g_state porque se compara entre llamadas.
+    boost::rational<int> last_synced_framerate{0, 1};
 
     // For executing scheduled commands through the AMCP parser
     std::weak_ptr<protocol::amcp::amcp_command_repository> command_repo;
@@ -74,7 +72,7 @@ cluster_state g_state;
 
 // Forward declarations
 void arm_watchdog(const spl::shared_ptr<std::vector<channel_context>>& channels);
-void sync_framerate_from_channels();
+void sync_framerate_from_channels(const spl::shared_ptr<std::vector<channel_context>>& channels);
 
 // ─── AMCP command: CLUSTER STATUS ───────────────────────────────────────────
 
@@ -182,7 +180,7 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
             return L"501 CLUSTER SCHEDULE FAILED\r\n";
         }
         arm_watchdog(ctx.channels);
-        sync_framerate_from_channels();
+        sync_framerate_from_channels(ctx.channels);
         frame_clock = g_state.frame_clock;
         scheduler   = g_state.scheduler;
         channel_map = g_state.channel_map;
@@ -262,16 +260,16 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
 // arm_watchdog() — cheap (no I/O), so safe to re-check on every command rather
 // than only once.
 
-void sync_framerate_from_channels()
+void sync_framerate_from_channels(const spl::shared_ptr<std::vector<channel_context>>& channels)
 {
-    if (!g_state.frame_clock || g_state.channels->empty())
+    if (!g_state.frame_clock || channels->empty())
         return;
 
     // The cluster's <channels> config maps virtual channels to physical ones;
     // frame_clock represents this member's own timeline, so it should track
     // whichever physical channel is configured first (matching how
     // command_relay/virtual_channel_map treat "the local channel" elsewhere).
-    for (const auto& ch_ctx : *g_state.channels) {
+    for (const auto& ch_ctx : *channels) {
         if (!ch_ctx.raw_channel)
             continue;
         auto fps = ch_ctx.raw_channel->stage()->video_format_desc().framerate;
@@ -343,7 +341,7 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
             return L"501 CLUSTER TRACK FAILED\r\n";
         }
         arm_watchdog(ctx.channels);
-        sync_framerate_from_channels();
+        sync_framerate_from_channels(ctx.channels);
         if (!g_state.watchdog) {
             return L"501 CLUSTER TRACK FAILED - NO WATCHDOG\r\n";
         }
@@ -603,10 +601,9 @@ void init(const core::module_dependencies& dependencies)
             L"Cluster Commands", L"CLUSTER UNTRACK", cluster_untrack_command, 1);
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        g_state.channels = dependencies.channels;
-    }
+    // Nuestra base no expone module_dependencies::channels (ver comentario junto
+    // a cluster_state) - los channel_context reales llegan por ctx.channels en
+    // el arme diferido (arm_watchdog/sync_framerate_from_channels), no aqui.
 
     // Parse config and start cluster if configured
     auto config = parse_cluster_config(env::properties());
