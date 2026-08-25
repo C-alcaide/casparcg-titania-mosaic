@@ -59,9 +59,11 @@
 #include <protocol/osc/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <future>
 #include <memory>
+#include <thread>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/regex.hpp>
@@ -377,6 +379,97 @@ std::wstring resume_command(command_context& ctx)
 {
     ctx.channel.stage->resume(ctx.layer_index());
     return L"202 RESUME OK\r\n";
+}
+
+// RESYNC <channel>-<layerA> <channel>-<layerB>: alinea dos layers (p.ej. Main/Backup del mismo
+// input) que deberían mostrar el mismo instante de contenido y se han desincronizado en el
+// arranque. No reposiciona nada (un stage->call(..., {"seek"}) no funciona sobre un producer de
+// red en directo, ver notas del modulo cluster) - en su lugar pausa la capa que va por delante
+// exactamente los frames de diferencia y la reanuda sola, dejando que la otra "la alcance" en
+// tiempo real. Mientras esta en pausa, layer::receive() (layer.cpp) no llama a
+// foreground_->receive() en absoluto, asi que el productor no pierde ningun frame propio al
+// reanudar - solo se congela lo que se ve.
+std::wstring resync_command(command_context& ctx)
+{
+    if (ctx.parameters.size() < 2) {
+        return L"400 RESYNC ERROR\r\n";
+    }
+
+    auto parse_channel_layer = [](const std::wstring& spec, int& channel_index, int& layer_index) {
+        auto dash = spec.find(L'-');
+        if (dash == std::wstring::npos) {
+            return false;
+        }
+        try {
+            channel_index = std::stoi(spec.substr(0, dash)) - 1;
+            layer_index   = std::stoi(spec.substr(dash + 1));
+        } catch (...) {
+            return false;
+        }
+        return true;
+    };
+
+    int channel_a = 0, layer_a = 0, channel_b = 0, layer_b = 0;
+    if (!parse_channel_layer(ctx.parameters.at(0), channel_a, layer_a) ||
+        !parse_channel_layer(ctx.parameters.at(1), channel_b, layer_b)) {
+        return L"400 RESYNC ERROR - USO: RESYNC <canal>-<layer> <canal>-<layer>\r\n";
+    }
+
+    auto channel_count = static_cast<int>(ctx.channels->size());
+    if (channel_a < 0 || channel_a >= channel_count || channel_b < 0 || channel_b >= channel_count) {
+        return L"400 RESYNC ERROR - CANAL FUERA DE RANGO\r\n";
+    }
+
+    auto stage_a = ctx.channels->at(channel_a).stage;
+    auto stage_b = ctx.channels->at(channel_b).stage;
+
+    // wait_for(0) en vez de .get() a secas - mismo patron que usa el watchdog del modulo
+    // cluster (content_sync.cpp) para no bloquear el hilo de comandos AMCP si el stage esta
+    // ocupado.
+    auto future_a = stage_a->foreground(layer_a);
+    auto future_b = stage_b->foreground(layer_b);
+    if (future_a.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready ||
+        future_b.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
+        return L"500 RESYNC ERROR - TIMEOUT LEYENDO LAYERS\r\n";
+    }
+
+    auto producer_a = future_a.get();
+    auto producer_b = future_b.get();
+    if (!producer_a || producer_a == core::frame_producer::empty() || !producer_b ||
+        producer_b == core::frame_producer::empty()) {
+        return L"404 RESYNC ERROR - LAYER VACIA\r\n";
+    }
+
+    auto fps = ctx.channels->at(channel_a).raw_channel->video_format_desc().framerate;
+    double   fps_value    = fps.numerator() > 0 && fps.denominator() > 0
+                                 ? static_cast<double>(fps.numerator()) / fps.denominator()
+                                 : 25.0;
+    int64_t diff_frames = static_cast<int64_t>(producer_a->frame_number()) -
+                          static_cast<int64_t>(producer_b->frame_number());
+
+    if (diff_frames == 0) {
+        return L"202 RESYNC OK - YA SINCRONIZADAS\r\n";
+    }
+
+    auto   stage_to_pause = diff_frames > 0 ? stage_a : stage_b;
+    int    layer_to_pause = diff_frames > 0 ? layer_a : layer_b;
+    double wait_seconds   = std::abs(diff_frames) / fps_value;
+
+    stage_to_pause->pause(layer_to_pause);
+
+    std::thread([stage_to_pause, layer_to_pause, wait_seconds]() {
+        std::this_thread::sleep_for(std::chrono::duration<double>(wait_seconds));
+        try {
+            stage_to_pause->resume(layer_to_pause);
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+    }).detach();
+
+    std::wostringstream reply;
+    reply << L"202 RESYNC OK - corrigiendo " << std::abs(diff_frames) << L" frames ("
+          << (diff_frames > 0 ? channel_a : channel_b) + 1 << L"-" << layer_to_pause << L")\r\n";
+    return reply.str();
 }
 
 std::wstring stop_command(command_context& ctx)
@@ -1722,6 +1815,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Basic Commands", L"PLAY", play_command, 0);
     repo->register_channel_command(L"Basic Commands", L"PAUSE", pause_command, 0);
     repo->register_channel_command(L"Basic Commands", L"RESUME", resume_command, 0);
+    repo->register_command(L"Basic Commands", L"RESYNC", resync_command, 2);
     repo->register_channel_command(L"Basic Commands", L"STOP", stop_command, 0);
     repo->register_channel_command(L"Basic Commands", L"CLEAR", clear_command, 0);
     repo->register_channel_command(L"Basic Commands", L"CALL", call_command, 1);
