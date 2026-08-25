@@ -440,7 +440,7 @@ std::wstring resync_command(command_context& ctx)
         return L"404 RESYNC ERROR - LAYER VACIA\r\n";
     }
 
-    auto fps = ctx.channels->at(channel_a).raw_channel->video_format_desc().framerate;
+    auto fps = stage_a->video_format_desc().framerate;
     double   fps_value    = fps.numerator() > 0 && fps.denominator() > 0
                                  ? static_cast<double>(fps.numerator()) / fps.denominator()
                                  : 25.0;
