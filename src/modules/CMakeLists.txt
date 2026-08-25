@@ -18,3 +18,7 @@ if (MSVC)
 	add_subdirectory(bluefish)
 endif()
 
+# Cluster sync module (always built)
+add_subdirectory(cluster)
+message(STATUS "Cluster module enabled")
+
