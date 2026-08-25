@@ -197,6 +197,14 @@ class renderer_application
         command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
         command_line->AppendSwitchWithValue("remote-allow-origins", "*");
 
+        // Mitigacion SIGILL en OnMemoryDump (malloc_dump_provider.cc): desactiva el tracing de
+        // memoria interno de Chromium (memory-infra), disparado solo por un timer, innecesario
+        // en CasparCG. Y evita el subproceso utility "Unzipper" (visto crasheando con
+        // stack-smashing) desactivando la actualizacion de componentes de Chromium.
+        command_line->AppendSwitchWithValue("disable-features", "MemoryInfra");
+        command_line->AppendSwitch("disable-component-update");
+        command_line->AppendSwitch("disable-background-networking");
+
         if (process_type.empty() && !enable_gpu_) {
             // This gives more performance, but disabled gpu effects. Without it a single 1080p producer cannot be run
             // smoothly
