@@ -1,16 +1,26 @@
 diff --git a/src/modules/ffmpeg/producer/av_input.cpp b/src/modules/ffmpeg/producer/av_input.cpp
-index 32d5181..96250ae 100644
+index 32d5181..953468f 100644
 --- a/src/modules/ffmpeg/producer/av_input.cpp
 +++ b/src/modules/ffmpeg/producer/av_input.cpp
-@@ -11,6 +11,7 @@
+@@ -3,6 +3,7 @@
+ #include "../util/av_assert.h"
+ #include "../util/av_util.h"
+ 
++#include <common/env.h>
+ #include <common/except.h>
+ #include <common/os/thread.h>
+ #include <common/param.h>
+@@ -10,7 +11,9 @@
+ 
  #include <boost/algorithm/string/case_conv.hpp>
  #include <boost/filesystem.hpp>
++#include <boost/property_tree/ptree.hpp>
  
 +#include <algorithm>
  #include <set>
  
  #ifdef _MSC_VER
-@@ -35,43 +36,114 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
+@@ -35,43 +38,114 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
      graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
  
      buffer_.set_capacity(256);
@@ -156,6 +166,31 @@ index 32d5181..96250ae 100644
  }
  
  Input::~Input()
+@@ -155,6 +229,24 @@ void Input::internal_reset()
+         FF(av_dict_set(&options, "rw_timeout", "60000000", 0)); // 60 second IO timeout
+     }
+ 
++    // ── A common epoch for feeds that have none ─────────────────────────────────────────
++    // Twenty encoders that are not PTP-locked produce twenty unrelated PTS epochs, so a
++    // timestamp cannot say two feeds were captured at the same instant -- only that one feed is
++    // consistent with itself. `use_wallclock_as_timestamps` replaces the PTS with this machine's
++    // clock at the moment the packet arrives (`demux.c:565`), which gives every feed one epoch
++    // and, incidentally, makes PTS wraparound irrelevant.
++    //
++    // What it costs is worth stating plainly: it measures ARRIVAL, not capture. Network jitter
++    // becomes timing jitter, and a feed that traverses a worse path reads as permanently later.
++    // For a monitoring wall whose requirement is "no feed accumulates error" that is a good
++    // trade; for anything where absolute capture time matters it is the wrong tool.
++    //
++    // Live only, and off by default. On a file it would stamp at read speed rather than playback
++    // rate, which is meaningless -- so the guard is correctness, not caution.
++    if (is_live() && env::properties().get(L"configuration.ffmpeg.producer.sync.wallclock-timestamps", false)) {
++        FF(av_dict_set(&options, "use_wallclock_as_timestamps", "1", 0));
++    }
++
+     AVFormatContext* ic             = avformat_alloc_context();
+     ic->interrupt_callback.callback = Input::interrupt_cb;
+     ic->interrupt_callback.opaque   = this;
 diff --git a/src/modules/ffmpeg/producer/av_input.h b/src/modules/ffmpeg/producer/av_input.h
 index e86ffca..d71109b 100644
 --- a/src/modules/ffmpeg/producer/av_input.h
@@ -187,7 +222,7 @@ index e86ffca..d71109b 100644
      std::optional<bool> seekable_;
  
 diff --git a/src/modules/ffmpeg/producer/av_producer.cpp b/src/modules/ffmpeg/producer/av_producer.cpp
-index f9cc879..200ad82 100644
+index f9cc879..3311269 100644
 --- a/src/modules/ffmpeg/producer/av_producer.cpp
 +++ b/src/modules/ffmpeg/producer/av_producer.cpp
 @@ -132,6 +132,11 @@ class Decoder
@@ -361,7 +396,7 @@ index f9cc879..200ad82 100644
              }
  
              if (format_desc_.field_count != 2 || frame_count_ % 2 == 1) {
-@@ -1006,6 +1128,31 @@ struct AVProducer::Impl
+@@ -1006,6 +1128,38 @@ struct AVProducer::Impl
          state_["file/clip"] = {start().value_or(0) / format_desc_.fps, duration().value_or(0) / format_desc_.fps};
          state_["file/time"] = {time() / format_desc_.fps, file_duration().value_or(0) / format_desc_.fps};
          state_["loop"]      = loop_;
@@ -371,6 +406,13 @@ index f9cc879..200ad82 100644
 +        // encoder's clock is from the channel's, so a site can be diagnosed before anything
 +        // is changed. Turning the governor on without this data first would be guessing.
 +        state_["sync/mode"]            = governor_enabled_ ? std::string("governed") : std::string("passive");
++        // Published because a timestamp source that changes silently is the worst kind: every
++        // sync/* number below means something different depending on it. Read here rather than
++        // passed from Input, since only live inputs actually apply it -- see av_input.cpp.
++        state_["sync/timestamps"] =
++            env::properties().get(L"configuration.ffmpeg.producer.sync.wallclock-timestamps", false)
++                ? std::string("wallclock")
++                : std::string("source");
 +        state_["sync/repeats"]         = repeats_;
 +        state_["sync/drops"]           = drops_;
 +        state_["sync/discontinuities"] = discontinuities_;
@@ -393,7 +435,7 @@ index f9cc879..200ad82 100644
      }
  
      core::draw_frame prev_frame(const core::video_field field)
-@@ -1035,13 +1182,27 @@ struct AVProducer::Impl
+@@ -1035,13 +1189,27 @@ struct AVProducer::Impl
          return !buffer_.empty() || frame_;
      }
  
@@ -422,7 +464,7 @@ index f9cc879..200ad82 100644
              auto start    = start_.load();
              auto duration = duration_.load();
  
-@@ -1058,9 +1219,45 @@ struct AVProducer::Impl
+@@ -1058,9 +1226,45 @@ struct AVProducer::Impl
              }
              graph_->set_tag(diagnostics::tag_severity::WARNING, "underflow");
              latency_ += 1;
@@ -468,7 +510,7 @@ index f9cc879..200ad82 100644
          if (format_desc_.field_count == 2) {
              // Check if the next frame is the correct 'field'
              auto is_field_1 = (buffer_[0].frame_count % 2) == 0;
-@@ -1082,6 +1279,7 @@ struct AVProducer::Impl
+@@ -1082,6 +1286,7 @@ struct AVProducer::Impl
          frame_flush_    = false;
  
          buffer_.pop_front();
@@ -476,7 +518,7 @@ index f9cc879..200ad82 100644
          buffer_cond_.notify_all();
  
          graph_->set_value("buffer", static_cast<double>(buffer_.size()) / static_cast<double>(buffer_capacity_));
-@@ -1098,6 +1296,12 @@ struct AVProducer::Impl
+@@ -1098,6 +1303,12 @@ struct AVProducer::Impl
          {
              boost::lock_guard<boost::mutex> lock(buffer_mutex_);
              buffer_.clear();
@@ -490,10 +532,10 @@ index f9cc879..200ad82 100644
              graph_->set_value("buffer", static_cast<double>(buffer_.size()) / static_cast<double>(buffer_capacity_));
          }
 diff --git a/src/shell/casparcg.config b/src/shell/casparcg.config
-index efc2a2d..e2c7fef 100644
+index efc2a2d..5070f5a 100644
 --- a/src/shell/casparcg.config
 +++ b/src/shell/casparcg.config
-@@ -50,6 +50,12 @@
+@@ -50,6 +50,13 @@
      <producer>
          <auto-deinterlace>interlaced [none|interlaced|all]</auto-deinterlace>
          <threads>4 [1..]</threads>
@@ -502,6 +544,7 @@ index efc2a2d..e2c7fef 100644
 +            <target-frames>4 [1..] (buffer depth to hold: this is the input latency you are choosing)</target-frames>
 +            <deadband-frames>2 [1..] (how far above target before correcting; smaller corrects more often)</deadband-frames>
 +            <min-interval-frames>25 [1..] (minimum ticks between corrections)</min-interval-frames>
++            <wallclock-timestamps>false [true|false] (live inputs only: stamp packets with this machine's clock on arrival instead of trusting the source PTS. Encoders that are not PTP-locked have no shared epoch, so their timestamps cannot be compared across feeds; this gives them one. It measures arrival rather than capture, so network jitter becomes timing jitter -- good for a monitoring wall, wrong where absolute capture time matters)</wallclock-timestamps>
 +        </sync>
      </producer>
  </ffmpeg>
