@@ -1134,6 +1134,13 @@ struct AVProducer::Impl
         // encoder's clock is from the channel's, so a site can be diagnosed before anything
         // is changed. Turning the governor on without this data first would be guessing.
         state_["sync/mode"]            = governor_enabled_ ? std::string("governed") : std::string("passive");
+        // Published because a timestamp source that changes silently is the worst kind: every
+        // sync/* number below means something different depending on it. Read here rather than
+        // passed from Input, since only live inputs actually apply it -- see av_input.cpp.
+        state_["sync/timestamps"] =
+            env::properties().get(L"configuration.ffmpeg.producer.sync.wallclock-timestamps", false)
+                ? std::string("wallclock")
+                : std::string("source");
         state_["sync/repeats"]         = repeats_;
         state_["sync/drops"]           = drops_;
         state_["sync/discontinuities"] = discontinuities_;

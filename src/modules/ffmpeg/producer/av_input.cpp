@@ -3,6 +3,7 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+#include <common/env.h>
 #include <common/except.h>
 #include <common/os/thread.h>
 #include <common/param.h>
@@ -10,6 +11,7 @@
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/property_tree/ptree.hpp>
 
 #include <algorithm>
 #include <set>
@@ -225,6 +227,24 @@ void Input::internal_reset()
     if (input_format == nullptr) {
         // TODO (fix) timeout?
         FF(av_dict_set(&options, "rw_timeout", "60000000", 0)); // 60 second IO timeout
+    }
+
+    // ── A common epoch for feeds that have none ─────────────────────────────────────────
+    // Twenty encoders that are not PTP-locked produce twenty unrelated PTS epochs, so a
+    // timestamp cannot say two feeds were captured at the same instant -- only that one feed is
+    // consistent with itself. `use_wallclock_as_timestamps` replaces the PTS with this machine's
+    // clock at the moment the packet arrives (`demux.c:565`), which gives every feed one epoch
+    // and, incidentally, makes PTS wraparound irrelevant.
+    //
+    // What it costs is worth stating plainly: it measures ARRIVAL, not capture. Network jitter
+    // becomes timing jitter, and a feed that traverses a worse path reads as permanently later.
+    // For a monitoring wall whose requirement is "no feed accumulates error" that is a good
+    // trade; for anything where absolute capture time matters it is the wrong tool.
+    //
+    // Live only, and off by default. On a file it would stamp at read speed rather than playback
+    // rate, which is meaningless -- so the guard is correctness, not caution.
+    if (is_live() && env::properties().get(L"configuration.ffmpeg.producer.sync.wallclock-timestamps", false)) {
+        FF(av_dict_set(&options, "use_wallclock_as_timestamps", "1", 0));
     }
 
     AVFormatContext* ic             = avformat_alloc_context();
