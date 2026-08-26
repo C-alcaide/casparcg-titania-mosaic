@@ -55,16 +55,19 @@ este fichero, el origen y el porqué de cada cambio no se puede reconstruir solo
      detección va en el hilo de decodificación, justo tras `best_effort_timestamp`, que es el
      último punto donde el timestamp original aún existe; un salto de más de 5 s en cualquier
      sentido reconstruye el grafo por la misma vía que ya usa un seek.
-   - **Sobre el wrap de PTS: la primera versión de esta entrada lo daba como causa y era falso.**
-     `libavformat` ya corrige el desbordamiento en la ruta de lectura — `wrap_timestamp()` se
-     aplica a `pkt->pts`/`pkt->dts` en `demux.c:559-560`, `correct_ts_overflow` vale 1 por
-     defecto, y `mpegts.c:928` fija `pts_wrap_bits = 33`. El wrap de ~26,5 h se corrige antes de
-     que el paquete llegue a nuestro decodificador. Lo que queda es una sospecha, no un hallazgo:
-     la descripción de la propia opción dice "correct **single** timestamp overflows", y
-     `update_wrap_reference` sale antes si la referencia ya está puesta (`demux.c:487`), así que
-     se fija una vez y no se revisa — un segundo wrap (~53 h) podría no estar cubierto, pero eso
-     hay que probarlo. La detección de discontinuidad se sostiene igual por los otros motivos,
-     que no dependen del wrap.
+   - **El wrap de PTS entra en esa lista, pero solo a partir del segundo — y esto está medido.**
+     `libavformat` corrige el desbordamiento en la ruta de lectura (`wrap_timestamp()` sobre
+     `pkt->pts`/`pkt->dts`, `demux.c:559-560`; `correct_ts_overflow` a 1 por defecto;
+     `pts_wrap_bits = 33` en `mpegts.c:928`), pero **solo uno**: `update_wrap_reference` sale
+     antes si la referencia ya está puesta (`demux.c:487`), o sea que se fija una vez y no se
+     revisa, tal como dice la descripción de la opción ("correct **single** timestamp
+     overflows"). Medido con FFmpeg 8.1.1 sobre TS sintéticos: un flujo de 5 s que cruza **un**
+     wrap da 1 salto hacia atrás en crudo y **0** con la corrección puesta; uno de 53 h que cruza
+     **dos** da 2 saltos en crudo y **siguen siendo 2** con la corrección puesta. Los residuales
+     son de ≈ −95.383 s, cuatro órdenes de magnitud por encima del umbral de 5 s. En un mosaico
+     24/7: el primer wrap (~26,5 h) es inofensivo, y desde las ~53 h cada wrap llega al
+     decodificador. (Fichero sintético, no SRT en vivo — la aritmética no depende del transporte,
+     pero eso último no está probado.)
    - **Un gobernador de ritmo, apagado por defecto.** `next_frame` solo podía repetir cuando se
      quedaba sin frames — y sin avanzar nada, así que el feed quedaba un frame más atrasado de
      forma permanente con cada episodio. El caso contrario es peor: una fuente algo rápida no
