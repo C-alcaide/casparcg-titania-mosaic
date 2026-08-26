@@ -79,6 +79,11 @@ este fichero, el origen y el porqué de cada cambio no se puede reconstruir solo
      profundidad de buffer) se publican en ambos casos por `INFO` y OSC, para poder medir un
      equipo antes de encender nada. `sync/net-slip-frames` es el número que importa: repeticiones
      menos descartes, y debería quedarse cerca de cero.
+
+     Sobre el audio: descartar un frame descarta el audio que viaja con él. En este despliegue el
+     audio **no se escucha, solo se mide** con los vúmetros, así que el chasquido es irrelevante y
+     lo único que hay que preservar es que la medida siga siendo correcta y siga correspondiendo a
+     su capa. En un contexto donde el audio se emitiera, esto no valdría.
    - **Un epoch común para feeds que no lo tienen** (`<wallclock-timestamps>`, apagado por
      defecto, solo entradas en vivo). Veinte encoders sin PTP producen veinte epochs de PTS sin
      relación entre sí, así que un timestamp no puede decir que dos feeds se capturaron en el

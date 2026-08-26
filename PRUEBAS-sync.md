@@ -220,16 +220,23 @@ pero conviene verlo y anotarlo.
 
 ## 6. Prueba 5 — audio y vúmetros
 
-Con audio real en al menos dos capas, provocar una corrección (prueba 2 con los flags encendidos) y
-comprobar:
+En este despliegue **el audio no se escucha: solo se ve, a través de los vúmetros**. Eso simplifica
+esta prueba y elimina la única pega que el gobernador tenía pendiente de aprobación — descartar un
+frame descarta el audio que viaja con él, y un chasquido que nadie oye no es un problema.
 
-- los vúmetros por capa siguen moviéndose y siguen correspondiendo a su capa;
-- el audio no queda desplazado respecto al vídeo de forma permanente;
-- no hay chasquidos repetidos más allá del instante de la corrección.
+Lo que sigue importando es que la medida sea correcta. Con audio real en al menos dos capas,
+provocar una corrección (prueba 2 con los flags encendidos) y comprobar:
 
-**Esto es lo más probable que se rompa en silencio**, porque el audio viaja en el mismo `Frame` que
-el vídeo: descartar un frame descarta su audio. En un muro de monitorización es aceptable; hay que
-confirmar que es *un* chasquido puntual y no un problema continuo.
+- los vúmetros por capa siguen moviéndose y **siguen correspondiendo a su capa** — que no se crucen
+  entre baldosas es lo que de verdad hay que mirar;
+- responden a cambios de nivel en el origen sin quedarse pegados;
+- no se quedan a cero en la capa corregida después de la corrección.
+
+Un descarte le quita al vúmetro los samples de un frame. A la cadencia esperada de correcciones
+(como mucho una cada `min-interval-frames`, o sea una cada segundo en el peor caso) eso es
+invisible en una barra de nivel. Si un vúmetro **sí** acusa el descarte de forma visible, es un
+hallazgo: significa que el gobernador está corrigiendo mucho más de lo previsto, y el número que lo
+confirma es `drops`.
 
 ---
 
