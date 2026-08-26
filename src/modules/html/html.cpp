@@ -184,6 +184,12 @@ class renderer_application
             }
         }
 
+        if (process_type == "gpu-process") {
+            // Fuerza rasterizado software desde el primer intento, en vez de depender
+            // del fallback interno de Chromium tras varios crashes de ANGLE/SwiftShader.
+            command_line->AppendSwitchWithValue("use-gl", "disabled");
+        }
+
 #if __unix__
         if (getenv("DISPLAY") == nullptr) {
             command_line->AppendSwitchWithValue("ozone-platform", "headless");
