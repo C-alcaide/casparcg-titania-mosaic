@@ -75,6 +75,30 @@ Salida, una línea por capa y por segundo:
 16:23:07 capa   1-10  modo=governed ts=wallclock slip=    -3 rep=  1204 drop=  1207 disc=  1 reconn=  0 buf=4/4.1 ppm=12
 ```
 
+### Los dos campos que responden a la investigación de MAIN/BACKUP
+
+`file/time` — el campo que ya existía y que `osc-bridge.js` ya consume — **no es el PTS de la
+señal**. Sale de la salida del grafo de filtros, y `fps=fps=...` (que se añade a *todos* los grafos
+de vídeo, `av_producer.cpp:410`) sustituye la marca de tiempo del stream por un contador propio
+(`vf_fps.c:305`). Los dos coinciden mientras no se descarte nada y se separan en silencio en cuanto
+se descarta algo — que es justo el fallo que se busca.
+
+Por eso este build publica además:
+
+| campo | qué es |
+| :--- | :--- |
+| `sync/source-time` | el reloj **de la señal**, tomado en el decodificador antes del grafo, normalizado igual que `file/time` para poder compararlos |
+| `sync/graph-slip-frames` | la diferencia entre los dos, en frames |
+
+Para qué sirve cada uno:
+
+* **`graph-slip-frames` distinto de cero y creciendo** significa que el grafo está descartando o
+  duplicando respecto al origen. Es la baldosa congelada con el buffer sano, hecha número.
+* **`source-time` sí es comparable entre capas** para un par MAIN/BACKUP que salga del mismo
+  codificador, cosa que `file/time` **no** es: cada producer normaliza contra su propio
+  `input_->start_time`, así que dos capas pueden marcar el mismo `file/time` con contenidos de
+  instantes distintos. Para comparar un par, comparar `source-time`.
+
 **El número que decide casi todo es `net-slip-frames`** — repeticiones menos descartes acumulados.
 Es el trinquete hecho número: si sube y no vuelve a bajar, esa capa se está quedando atrás de forma
 permanente. Los demás contadores explican *por qué*.

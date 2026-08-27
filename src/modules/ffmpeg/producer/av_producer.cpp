@@ -49,6 +49,7 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <iomanip>
 #include <memory>
@@ -136,6 +137,10 @@ class Decoder
     /// producer thread, which rebuilds the filter graph. See the detection site below for why
     /// it cannot be done anywhere later.
     std::atomic<bool> discontinuity = {false};
+
+    /// Latest decoded SOURCE timestamp, in AV_TIME_BASE units; AV_NOPTS_VALUE until the first
+    /// frame carries one. Written by the decode thread, read by the producer thread for state.
+    std::atomic<int64_t> source_time = {AV_NOPTS_VALUE};
 
     std::queue<std::shared_ptr<AVPacket>> input;
     mutable boost::mutex                  input_mutex;
@@ -265,6 +270,20 @@ class Decoder
                             }
                         }
 
+                        // Publish the SOURCE timestamp, for the same reason the check above sits
+                        // here: this is the last place it exists. Everything downstream -- and
+                        // that includes `file/time`, which is what an operator reads over OSC --
+                        // is derived from the filter graph's output, i.e. from `vf_fps`'s counter
+                        // rather than from the stream. The two agree while nothing is dropped and
+                        // diverge silently afterwards, which is exactly the failure worth
+                        // catching, and until now there was no way to see it happen.
+                        //
+                        // Rescaled to AV_TIME_BASE so it can be compared across streams whose
+                        // time bases differ; comparing raw ticks between two inputs is wrong.
+                        if (av_frame->pts != AV_NOPTS_VALUE) {
+                            source_time = av_rescale_q(av_frame->pts, st->time_base, TIME_BASE_Q);
+                        }
+
 #if LIBAVUTIL_VERSION_MAJOR < 58
                         auto duration_pts = av_frame->pkt_duration;
 #else
@@ -328,6 +347,10 @@ class Decoder
     /// True once since the last call: this stream's timeline jumped. Consumed by the producer
     /// thread, which rebuilds the filter graph so `vf_fps` re-seeds its output counter.
     bool take_discontinuity() { return discontinuity.exchange(false); }
+
+    /// Source-side clock, AV_TIME_BASE units. See the write site for why this is not the same
+    /// thing as `Frame::pts`.
+    int64_t take_source_time() const { return source_time.load(); }
 
     bool want_packet() const
     {
@@ -1151,6 +1174,50 @@ struct AVProducer::Impl
         // the feed is slipping and nothing is giving the frames back. This single number is
         // what the whole exercise is about.
         state_["sync/net-slip-frames"] = repeats_ - drops_;
+
+        // ── The source clock, and how far the presented one has drifted from it ─────────
+        // `file/time` above is derived from the filter graph's output, so it counts frames
+        // PRESENTED. `vf_fps` replaces the stream timestamp with its own counter
+        // (`vf_fps.c:305`), which means the two agree while nothing is dropped and part company
+        // silently when something is -- and there was previously no way to observe that from
+        // outside. `sync/source-time` is the stream's own clock, normalised the same way as
+        // `file/time` so the two are directly comparable, and `sync/graph-slip-frames` is their
+        // difference in frames.
+        //
+        // A non-zero, growing `graph-slip-frames` means the graph is dropping or duplicating
+        // against the source: the failure that presents as a frozen tile with a healthy buffer.
+        // For two feeds off ONE encoder -- a main/backup pair -- `source-time` is directly
+        // comparable between layers, which `file/time` is not, because each producer normalises
+        // against its own `input_->start_time`.
+        {
+            int64_t src = AV_NOPTS_VALUE;
+            for (auto& p : decoders_) {
+                if (p.second.ctx && p.second.ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+                    src = p.second.take_source_time();
+                    break;
+                }
+            }
+
+            // `operator->` yields the AVFormatContext, which is null between a failed reopen
+            // and the next successful one -- a state this build can now actually reach, since
+            // the input reconnects instead of dying. The surrounding code runs where it cannot
+            // be null; this runs on every state tick, so it can.
+            const auto* ic        = input_.operator->();
+            const auto  start_time =
+                (ic != nullptr && ic->start_time != AV_NOPTS_VALUE) ? ic->start_time : static_cast<int64_t>(0);
+            if (src != AV_NOPTS_VALUE) {
+                const auto normalised = src - start_time;
+                state_["sync/source-time"] = normalised / static_cast<double>(AV_TIME_BASE);
+                state_["sync/graph-slip-frames"] =
+                    static_cast<int64_t>(std::llround((normalised - frame_time_) /
+                                                      static_cast<double>(frame_duration_ > 0 ? frame_duration_ : 1)));
+            } else {
+                // Said explicitly rather than omitted: a missing field reads as a broken
+                // exporter, and "this stream carries no usable timestamps" is a real answer.
+                state_["sync/source-time"]       = -1.0;
+                state_["sync/graph-slip-frames"] = 0;
+            }
+        }
 
         // The offset the governor is correcting for, in parts per million -- i.e. how far this
         // encoder's crystal is from the host's. Identifies WHICH encoder to fix, rather than

@@ -95,12 +95,13 @@ def main():
             for key in sorted(state, key=lambda k: [int(x) for x in k.split('-')]):
                 s = state[key]
                 print("%s capa %6s  modo=%-8s ts=%-9s slip=%6s rep=%6s drop=%6s "
-                      "disc=%3s reconn=%3s buf=%s/%s ppm=%s"
+                      "disc=%3s reconn=%3s buf=%s/%s ppm=%s src=%s gslip=%s"
                       % (stamp, key, s.get('mode', '?'), s.get('timestamps', '?'),
                          s.get('net-slip-frames', '?'), s.get('repeats', '?'),
                          s.get('drops', '?'), s.get('discontinuities', '?'),
                          s.get('reconnects', '?'), s.get('buffer', '?'),
-                         s.get('buffer-avg', '?'), s.get('offset-ppm', '?')))
+                         s.get('buffer-avg', '?'), s.get('offset-ppm', '?'),
+                         s.get('source-time', '?'), s.get('graph-slip-frames', '?')))
             print('', flush=True)
 
 
